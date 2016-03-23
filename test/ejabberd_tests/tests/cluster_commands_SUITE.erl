@@ -19,8 +19,8 @@
 
 -import(distributed_helper, [add_node_to_cluster/1,
                              remove_node_from_cluster/1,
-                             is_sm_distributed/0]).
--import(ejabberdctl_helper, [ejabberdctl/3, rpc_call/3, verify_result/1]).
+                             is_sm_distributed/0, verify_result/1]).
+-import(ejabberdctl_helper, [ejabberdctl/3, rpc_call/3]).
 
 
 -include_lib("common_test/include/ct.hrl").
@@ -36,8 +36,9 @@ all() ->
 
 groups() ->
     [{clustered, [], [one_to_one_message]},
-      {clustering, [], [join_successful, leave_successful]},
-     {ejabberdctl, [], [set_master_test]}].
+      {clustering, [], [join_successful, leave_successful,
+        join_unsuccessful, leave_unsuccessful]},
+      {ejabberdctl, [], [set_master_test]}].
 
 suite() ->
     escalus:suite().
@@ -78,12 +79,30 @@ init_per_group(Group, Config) when Group == clustered orelse Group == ejabberdct
             remove_node_from_cluster(Config1),
             {skip, nondistributed_sm}
     end;
+
+init_per_group(clustering, Config) ->
+  case is_sm_distributed() of
+    true ->
+      escalus:create_users(Config, escalus:get_users([alice, clusterguy]));
+    {false, Backend} ->
+      ct:pal("Backend ~p doesn't support distributed tests", [Backend]),
+      remove_node_from_cluster(Config),
+      {skip, nondistributed_sm}
+  end;
+
 init_per_group(_GroupName, Config) ->
     escalus:create_users(Config).
 
 end_per_group(Group, Config) when Group == clustered orelse Group == ejabberdctl ->
     escalus:delete_users(Config, escalus:get_users([alice, clusterguy])),
     remove_node_from_cluster(Config);
+
+%% Users are gone after mnesia cleaning
+%% hence there is no need to delete them manually
+end_per_group(clustering, Config) ->
+  remove_node_from_cluster(Config),
+  ok;
+
 end_per_group(_GroupName, Config) ->
     escalus:delete_users(Config).
 
@@ -135,12 +154,52 @@ set_master_test(ConfigIn) ->
 
 join_successful(Config) ->
   Node2 = ct:get_config(ejabberd2_node),
-  ejabberdctl("join_cluster", [atom_to_list(Node2)], Config),
+  ejabberdctl_interactive("join_cluster", [atom_to_list(Node2)], "yes\n", Config),
+  verify_result(add).
+
+leave_successful(Config) ->
+  ejabberdctl_interactive("leave_cluster", [], "yes\n",  Config),
+  verify_result(remove).
+
+join_unsuccessful(Config) ->
+  ejabberdctl_interactive("join_cluster", [], "no\n",  Config),
+  verify_result(remove).
+
+leave_unsuccessful(Config) ->
+  join_successful(Config),
+  ejabberdctl_interactive("leave_cluster", [], "no\n",  Config),
   verify_result(add).
 
 
-leave_successful(Config) ->
-  ejabberdctl("leave_cluster", [], Config),
-  verify_result(remove).
 
+%% Helpers
+ejabberdctl_interactive(Cmd, Args, Response, Config) ->
+  CtlCmd = escalus_config:get_config(ctl_path, Config),
+  run_interactive(string:join([CtlCmd, Cmd | normalize_args(Args)], " "), Response).
+
+normalize_args(Args) ->
+  lists:map(fun
+              (Arg) when is_binary(Arg) ->
+                binary_to_list(Arg);
+              (Arg) when is_list(Arg) ->
+                Arg
+            end, Args).
+
+%% Long timeout for mnesia and ejabberd app restart
+run_interactive(Cmd, Response) ->
+  run_interactive(Cmd, Response, timer:seconds(30)).
+
+run_interactive(Cmd, Response, Timeout) ->
+  Port = erlang:open_port({spawn, Cmd},[exit_status]),
+  %% respond to interactive question (yes/no)
+  Port ! {self(), {command, Response}},
+  loop(Port,[], Timeout).
+
+loop(Port, Data, Timeout) ->
+  receive
+    {Port, {data, NewData}} -> loop(Port, Data++NewData, Timeout);
+    {Port, {exit_status, ExitStatus}} -> {Data, ExitStatus}
+  after Timeout ->
+    throw(timeout)
+  end.
 
