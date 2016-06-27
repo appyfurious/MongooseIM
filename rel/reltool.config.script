@@ -39,7 +39,8 @@ BaseAppsToInclude = AppsToRun ++
                      alarms,
                      idna,
                      recon,
-                     setup],
+                     setup,
+                     jsx],
 
 AppsToIncludeIn = BaseAppsToInclude ++ EnvAppsToInclude,
 
